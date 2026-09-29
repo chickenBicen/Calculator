@@ -2,6 +2,7 @@
 # this project has been written with the help of the internet and AI to explain and learn things that I didn't yet know
 # any code that was fully written with ai is fully disclosed
 
+import math
 from enum import Enum
 
 
@@ -25,9 +26,48 @@ OPERATORS = {
     "^": {"precedence": 30, "associativity": "right"},
 }
 
+# the precedence that unary operators have such that it has more than multiplication but not more than exponentiation
 UNARY_PRECEDENCE = 25
 
 
+FUNCTIONS = {
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "asin": math.asin,
+    "acos": math.acos,
+    "atan": math.atan,
+    "sqrt": math.sqrt,
+    "ln": math.log,
+    "log": math.log10,
+}
+
+CONSTANTS = {
+    "e": math.e,
+    "pi": math.pi,
+}
+
+
+# needed to keep things like sin(pi) true
+def format_result(value):
+    if abs(value) < 1e-15:
+        return 0
+    return value
+
+
+# class that loads and saves memory that I want to persist
+# variables, functions, previous answers, etc.
+class Environment:
+    def __init__(self) -> None:
+        self.variables: dict[str, float] = {}
+
+
+##############################################################################
+############################### TOKENIZING ###################################
+##############################################################################
+
+
+# Piece of information in the expression ofc ofc
 class Token:
     def __init__(self, value, tokentype) -> None:
         self.type = tokentype
@@ -37,16 +77,21 @@ class Token:
         return f"Token({self.value}, {self.type})"
 
 
+# class that tokenizes the initial string expression into smaller pieces
 class Lexer:
     def __init__(self, line: str) -> None:
-        self.line: str = line
-        self.last_token: Token = Token("", TokenType.NONE)
-        self.tokens: list = []
-        self.pos: int = 0
+        self.line: str = line  # expression
 
+        # obv just stores the previous token
+        self.last_token: Token = Token("", TokenType.NONE)
+        self.tokens: list = []  # final output of all the tokens
+        self.pos: int = 0  # position we're in across the expression in characters
+
+    # just checks whether or not c is a number
     def check_number(self, c, last_type):
         return c.isdigit()
 
+    # seperating tokenizing of a number from everthing else for readability
     def tokenize_number(self, value, c, last_type):
 
         while self.pos < len(self.line) and (
@@ -76,11 +121,12 @@ class Lexer:
             #
             #     #TODO: add last answer in evaluator
 
-            if self.check_number(c, last_type):
+            elif self.check_number(c, last_type):
                 last_type = TokenType.NUMBER
                 return self.tokenize_number(value, c, last_type)
 
-            if c.isalpha():
+            ################### tokenizes identifiers #####################
+            elif c.isalpha():
                 ident = ""
 
                 while self.pos < len(self.line) and (
@@ -93,29 +139,34 @@ class Lexer:
                 last_type = self.last_token.type
                 return self.last_token
 
-            if c == "=":
+            #################### tokenizes operators ####################
+
+            elif c == "=":
                 self.pos += 1
                 self.last_token = Token("=", TokenType.EQUAL)
                 last_type = self.last_token.type
                 return self.last_token
 
-            if c in ["-", "+", "*", "/", "^"]:
+            elif c in ["-", "+", "*", "/", "^"]:
                 self.pos += 1
                 self.last_token = Token(c, TokenType.OPERATOR)
                 last_type = self.last_token.type
                 return self.last_token
 
-            if c == "(":
+            elif c == "(":
                 self.pos += 1
                 self.last_token = Token(c, TokenType.LPAREN)
                 last_type = self.last_token.type
                 return self.last_token
 
-            if c == ")":
+            elif c == ")":
                 self.pos += 1
                 self.last_token = Token(c, TokenType.RPAREN)
                 last_type = self.last_token.type
                 return self.last_token
+
+            else:
+                raise SyntaxError("Unknown character")
 
         self.pos = 0
         self.last_token = Token("", TokenType.NONE)
@@ -133,6 +184,12 @@ class Lexer:
         return tokens
 
 
+##########################################################################
+############################ AST Tree ####################################
+##########################################################################
+
+
+# Base class
 class ASTNode:
     def __init__(self) -> None:
         pass
@@ -173,15 +230,33 @@ class IdentifierNode(ASTNode):
         super().__init__()
         self.value = value
 
+    def __repr__(self) -> str:
+        return self.value
+
 
 class FunctionCallNode(ASTNode):
-    def __init__(self, id: str, arguments: list) -> None:
+    def __init__(self, id: str, arguments: list[ASTNode]) -> None:
         super().__init__()
         self.name = id
         self.arguments = arguments
 
     def __repr__(self) -> str:
-        return f"FunctionCallNode(name: {self.name}, arguments: [{self.arguments}])"
+        return f"FunctionCallNode(name: {self.name}, arguments: {self.arguments})"
+
+
+class AssignmentNode(ASTNode):
+    def __init__(self, name: str, right: ASTNode) -> None:
+        super().__init__()
+        self.name = name
+        self.right = right
+
+    def __repr__(self) -> str:
+        return f"AssignmentNode(name: {self.name}, right: {self.right})"
+
+
+##########################################################################
+############################### PARSING ##################################
+##########################################################################
 
 
 class Parser:
@@ -192,11 +267,28 @@ class Parser:
     def reset(self):
         self.pos = 0
 
+    def handle_explicit_operators(self, left, token, min_precedence):
+        operator = token.value
+        self.pos += 1
+
+        if OPERATORS[operator]["associativity"] == "right":
+            power = OPERATORS[operator]["precedence"]
+        else:
+            power = OPERATORS[operator]["precedence"] + 1
+
+        right = self.parse(power)
+        left = BinaryOperatorNode(operator, left, right)
+
     def parse(self, min_precedence: int = 0):
-        token = self.tokens[self.pos]
+
+        token = self.tokens[self.pos]  # current token
+
+        # parsing parenthesis in their own way separate from precedence
+
         if token.type == TokenType.LPAREN:
             self.pos += 1
             left = self.parse()
+
             if (
                 self.pos >= len(self.tokens)
                 or self.tokens[self.pos].type != TokenType.RPAREN
@@ -205,14 +297,20 @@ class Parser:
 
             self.pos += 1
 
+        if token.type == TokenType.RPAREN:
+            raise SyntaxError("Unexpected ')'")
+
+        # unary - and + handling
         elif token.value in ["-", "+"]:
             self.pos += 1
             left = UnaryOperatorNode(token.value, self.parse(UNARY_PRECEDENCE))
 
+        # handles regular numbers
         elif token.type == TokenType.NUMBER:
             self.pos += 1
             left = NumberNode(token.value)
 
+        # handles identifiers of any kind
         elif token.type == TokenType.IDENTIFIER:
             self.pos += 1
             left = IdentifierNode(token.value)
@@ -234,116 +332,166 @@ class Parser:
 
                 self.pos += 1
 
-        while self.pos < len(self.tokens) and (
-            self.tokens[self.pos].type == TokenType.OPERATOR
-            and OPERATORS[self.tokens[self.pos].value]["precedence"] >= min_precedence
-        ):
-            operator = self.tokens[self.pos].value
-            self.pos += 1
+            if (
+                self.pos < len(self.tokens)
+                and self.tokens[self.pos].type == TokenType.EQUAL
+            ):
+                if not isinstance(left, IdentifierNode):
+                    raise SyntaxError("assigning something that is not assignable")
 
-            if OPERATORS[operator]["associativity"] == "right":
-                power = OPERATORS[operator]["precedence"]
+                self.pos += 1
+
+                right = self.parse()
+
+                return AssignmentNode(left.value, right)
+
+        # handles operators and gets the rhs of operators
+        while self.pos < len(self.tokens):
+            token = self.tokens[self.pos]
+
+            # Explicit operator
+            if token.type == TokenType.OPERATOR:
+                if OPERATORS[token.value]["precedence"] < min_precedence:
+                    break
+
+                operator = token.value
+                self.pos += 1
+
+                if OPERATORS[operator]["associativity"] == "right":
+                    power = OPERATORS[operator]["precedence"]
+                else:
+                    power = OPERATORS[operator]["precedence"] + 1
 
                 right = self.parse(power)
                 left = BinaryOperatorNode(operator, left, right)
+
+            # Implicit multiplication
+            elif token.type in [
+                TokenType.NUMBER,
+                TokenType.IDENTIFIER,
+                TokenType.LPAREN,
+            ]:
+                if 20 < min_precedence:
+                    break
+
+                right = self.parse(21)
+                left = BinaryOperatorNode("*", left, right)
 
             else:
-                power = OPERATORS[operator]["precedence"] + 1
-
-                right = self.parse(power)
-                left = BinaryOperatorNode(operator, left, right)
+                break
 
         return left
 
 
-# class Evaluator:
-#     def __init__(self, root:ASTNode) :
-#         self.output = 0
-#
-#     def evaluate():
-#
+###############################################################################
+################################ EVALUATION ###################################
+###############################################################################
 
 
-# !!!!!!!!!!!!!!!!! FULLY AI WRITTEN CODE DISCLOSURE !!!!!!!!!!!!!!!!!!!
-def print_tree(root: ASTNode, prefix="", is_left=True):
-    if isinstance(root, NumberNode):
-        print(prefix + ("└── " if is_left else "┌── ") + str(root.value))
-        return
+class Evaluator:
+    def __init__(self, environment: Environment):
+        self.environment = environment
 
-    if isinstance(root, IdentifierNode):
-        print(prefix + ("└── " if is_left else "┌── ") + root.value)
-        return
+    def evaluate(self, node: ASTNode) -> float:
+        if isinstance(node, NumberNode):
+            return node.value
 
-    if isinstance(root, UnaryOperatorNode):
-        print(prefix + ("└── " if is_left else "┌── ") + root.operator, end="")
+        elif isinstance(node, UnaryOperatorNode):
+            match node.operator:
+                case "-":
+                    return -1 * self.evaluate(node.operand)
 
-        if root.operand:
-            print(" ── ", end="")
-            print_tree_inline(root.operand)
+                case "+":
+                    return self.evaluate(node.operand)
+                case _:
+                    raise SyntaxError("Invalid unary operator")
+                    return 0
+
+        elif isinstance(node, BinaryOperatorNode):
+            match node.operator:
+                case "+":
+                    return self.evaluate(node.left) + self.evaluate(node.right)
+                case "-":
+                    return self.evaluate(node.left) - self.evaluate(node.right)
+                case "*":
+                    return self.evaluate(node.left) * self.evaluate(node.right)
+                case "/":
+                    return self.evaluate(node.left) / self.evaluate(node.right)
+                case "^":
+                    return self.evaluate(node.left) ** self.evaluate(node.right)
+
+                case _:
+                    raise SyntaxError("none existant binary operator")
+                    return 0
+
+        elif isinstance(node, FunctionCallNode):
+            return FUNCTIONS[node.name](self.evaluate(node.arguments[0]))
+
+        elif isinstance(node, IdentifierNode):
+            if node.value in self.environment.variables:
+                return self.environment.variables[node.value]
+
+            if node.value in CONSTANTS:
+                return CONSTANTS[node.value]
+
+            raise NameError(f"Unknown identifier: {node.value}")
+
+        elif isinstance(node, AssignmentNode):
+            value = self.evaluate(node.right)
+            self.environment.variables[node.name] = value
+            return value
         else:
-            print()
-
-        return
-
-    if isinstance(root, FunctionCallNode):
-        print(prefix + ("└── " if is_left else "┌── ") + root.name, end="")
-
-        for argument in root.arguments:
-            print(" ── ", end="")
-            print_tree_inline(argument)
-
-        print()
-        return
+            return 0
 
 
-def print_tree_inline(root):
-    if isinstance(root, NumberNode):
-        print(root.value, end="")
-        return
+class App:
+    def __init__(self) -> None:
+        self.environment = Environment()
 
-    if isinstance(root, IdentifierNode):
-        print(root.value, end="")
-        return
+    def run(self):
+        while True:
+            expression = input(">")
 
-    if isinstance(root, UnaryOperatorNode):
-        print(root.operator, end="")
-        print(" ── ", end="")
-        print_tree_inline(root.operand)
-        return
+            if expression not in [
+                ":help",
+                ":variables",
+                ":functions",
+                ":vars",
+                ":funcs",
+            ]:
+                lexer = Lexer(expression)
+                tokens = lexer.tokenize_all()
 
-    if isinstance(root, FunctionCallNode):
-        print(root.name, end="")
-        for argument in root.arguments:
-            print(" ── ", end="")
-            print_tree_inline(argument)
-        return
+                parser = Parser(tokens)
+                AST_tree_root = parser.parse()
 
-    if isinstance(root, BinaryOperatorNode):
-        # Binary expressions still need their normal tree structure,
-        # so don't try to flatten them here.
-        print("(", end="")
-        print_tree_inline(root.left)
-        print(f" {root.operator} ", end="")
-        print_tree_inline(root.right)
-        print(")", end="")
+                evaluator = Evaluator(self.environment)
+                answer = evaluator.evaluate(AST_tree_root)
+
+                print(answer)
+
+            else:
+                match expression:
+                    case ":help":
+                        print(
+                            "type any expression using +-/*^ operators and basic functions like sqrt() and sin()\n Use :funcs to show list of all functions\n Use :vars to show list of all saved variables"
+                        )
+                    case ":vars" | ":variables":
+                        print("CONSTANTS\n-------------------------")
+                        for constant, value in CONSTANTS.items():
+                            print(f"{constant}: {value}")
+
+                        print("VARIABLES\n-------------------------")
+                        for variable, value in self.environment.variables.items():
+                            print(f"{variable}: {value}")
+                    case ":funcs" | ":functions":
+                        print("\n FUNCTIONS\n-------------------------")
+                        for function, value in FUNCTIONS.items():
+                            print(f"{function}(x)")
 
 
-#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+environment = Environment()
 
+app = App()
 
-input = input()
-
-lexer = Lexer(input)
-
-tokens = lexer.tokenize_all()
-
-for i in tokens:
-    print(i)
-
-parser = Parser(tokens)
-
-print(parser.parse(), "\n")
-
-parser.reset()
-
-print_tree(parser.parse())
+app.run()
