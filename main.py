@@ -5,19 +5,6 @@
 import math
 from enum import Enum
 
-
-class TokenType(Enum):
-    NONE = 0
-    NUMBER = 1
-    IDENTIFIER = 2
-    EQUAL = 3
-    OPERATOR = 4
-    FUNCTION = 5
-    LPAREN = 6
-    RPAREN = 7
-    END = 8
-
-
 OPERATORS = {
     "+": {"precedence": 10, "associativity": "left"},
     "-": {"precedence": 10, "associativity": "left"},
@@ -42,10 +29,37 @@ FUNCTIONS = {
     "log": math.log10,
 }
 
+FUNCTIONS_FUTURE_IMPLEMENTATION = {
+    "sin": {"function": math.sin, "arguments": 1},
+    "cos": {"function": math.cos, "arguments": 1},
+    "tan": {"function": math.tan, "arguments": 1},
+    "asin": {"function": math.asin, "arguments": 1},
+    "acos": {"function": math.acos, "arguments": 1},
+    "atan": {"function": math.atan, "arguments": 1},
+    "sqrt": {"function": math.sqrt, "arguments": 1},
+    "ln": {"function": math.log, "arguments": 1},
+    "log": {"function": math.log10, "arguments": 1},
+    "logbase": {"function": math.log, "arguments": 2},
+    "max": {"function": math.log, "argumetns": 2},
+}
+
 CONSTANTS = {
     "e": math.e,
     "pi": math.pi,
 }
+
+
+class TokenType(Enum):
+    NONE = 0
+    NUMBER = 1
+    IDENTIFIER = 2
+    EQUAL = 3
+    OPERATOR = 4
+    FUNCTION = 5
+    LPAREN = 6
+    RPAREN = 7
+    COMMA = 8
+    END = 9
 
 
 # needed to keep things like sin(pi) true
@@ -60,6 +74,7 @@ def format_result(value):
 class Environment:
     def __init__(self) -> None:
         self.variables: dict[str, float] = {}
+        self.functions: dict[str, UserFunction] = {}
 
 
 ##############################################################################
@@ -120,6 +135,9 @@ class Lexer:
             #     self.pos += 3
             #
             #     #TODO: add last answer in evaluator
+            elif c == ",":
+                self.pos += 1
+                self.last_token = Token(",", TokenType.COMMA)
 
             elif self.check_number(c, last_type):
                 last_type = TokenType.NUMBER
@@ -254,6 +272,21 @@ class AssignmentNode(ASTNode):
         return f"AssignmentNode(name: {self.name}, right: {self.right})"
 
 
+class FunctionDefintionNode(ASTNode):
+    def __init__(self, name: str, parameters: list, body: ASTNode) -> None:
+        super().__init__()
+        self.name = name
+        self.parameters = parameters
+        self.body = body
+
+
+class UserFunction:
+    def __init__(self, name: str, parameters: list, body: ASTNode) -> None:
+        self.name = name
+        self.parameters = parameters
+        self.body = body
+
+
 ##########################################################################
 ############################### PARSING ##################################
 ##########################################################################
@@ -281,6 +314,9 @@ class Parser:
 
     def parse(self, min_precedence: int = 0):
 
+        if self.pos >= len(self.tokens):
+            raise SyntaxError(f"Expected expression at position {self.pos}")
+
         token = self.tokens[self.pos]  # current token
 
         # parsing parenthesis in their own way separate from precedence
@@ -297,7 +333,7 @@ class Parser:
 
             self.pos += 1
 
-        if token.type == TokenType.RPAREN:
+        elif token.type == TokenType.RPAREN:
             raise SyntaxError("Unexpected ')'")
 
         # unary - and + handling
@@ -313,25 +349,65 @@ class Parser:
         # handles identifiers of any kind
         elif token.type == TokenType.IDENTIFIER:
             self.pos += 1
-            left = IdentifierNode(token.value)
+            name = token.value
 
+            # Possible function definition or function call
             if (
                 self.pos < len(self.tokens)
                 and self.tokens[self.pos].type == TokenType.LPAREN
             ):
-                self.pos += 1
+                self.pos += 1  # consume '('
 
-                argument = self.parse()
-                left = FunctionCallNode(left.value, [argument])
-
+                # Check whether this is a function definition
                 if (
-                    self.pos >= len(self.tokens)
-                    or self.tokens[self.pos].type != TokenType.RPAREN
+                    self.pos < len(self.tokens)
+                    and self.tokens[self.pos].type == TokenType.IDENTIFIER
                 ):
-                    raise SyntaxError("Expected ')'")
+                    parameter = self.tokens[self.pos].value
+                    self.pos += 1
 
-                self.pos += 1
+                    if (
+                        self.pos >= len(self.tokens)
+                        or self.tokens[self.pos].type != TokenType.RPAREN
+                    ):
+                        raise SyntaxError("Expected ')'")
 
+                    self.pos += 1  # consume ')'
+
+                    # f(x) = ...
+                    if (
+                        self.pos < len(self.tokens)
+                        and self.tokens[self.pos].type == TokenType.EQUAL
+                    ):
+                        self.pos += 1  # consume '='
+
+                        body = self.parse()
+
+                        return FunctionDefintionNode(name, [parameter], body)
+
+                    # Otherwise this was a function call:
+                    # f(x)
+                    argument = IdentifierNode(parameter)
+                    left = FunctionCallNode(name, [argument])
+
+                else:
+                    # Eventually you'll handle things like f(2 + 3)
+                    argument = self.parse()
+
+                    if (
+                        self.pos >= len(self.tokens)
+                        or self.tokens[self.pos].type != TokenType.RPAREN
+                    ):
+                        raise SyntaxError("Expected ')'")
+
+                    self.pos += 1
+
+                    left = FunctionCallNode(name, [argument])
+
+            else:
+                left = IdentifierNode(name)
+
+            # Variable assignment
             if (
                 self.pos < len(self.tokens)
                 and self.tokens[self.pos].type == TokenType.EQUAL
@@ -340,7 +416,6 @@ class Parser:
                     raise SyntaxError("assigning something that is not assignable")
 
                 self.pos += 1
-
                 right = self.parse()
 
                 return AssignmentNode(left.value, right)
@@ -410,22 +485,48 @@ class Evaluator:
         elif isinstance(node, BinaryOperatorNode):
             match node.operator:
                 case "+":
-                    return self.evaluate(node.left) + self.evaluate(node.right)
+                    answer = self.evaluate(node.left) + self.evaluate(node.right)
+                    return round(answer, 10)
                 case "-":
-                    return self.evaluate(node.left) - self.evaluate(node.right)
+                    answer = self.evaluate(node.left) - self.evaluate(node.right)
+                    return round(answer, 10)
                 case "*":
-                    return self.evaluate(node.left) * self.evaluate(node.right)
+                    answer = self.evaluate(node.left) * self.evaluate(node.right)
+                    return round(answer, 10)
                 case "/":
-                    return self.evaluate(node.left) / self.evaluate(node.right)
+                    answer = self.evaluate(node.left) / self.evaluate(node.right)
+                    return round(answer, 10)
+
                 case "^":
-                    return self.evaluate(node.left) ** self.evaluate(node.right)
+                    answer = self.evaluate(node.left) ** self.evaluate(node.right)
+
+                    return round(answer, 10)
 
                 case _:
                     raise SyntaxError("none existant binary operator")
                     return 0
 
         elif isinstance(node, FunctionCallNode):
-            return FUNCTIONS[node.name](self.evaluate(node.arguments[0]))
+            if node.name in FUNCTIONS:
+                return FUNCTIONS[node.name](self.evaluate(node.arguments[0]))
+            elif node.name in self.environment.functions:
+                function = self.environment.functions[node.name]
+                parameter = function.parameters
+                had_old_value = parameter[0] in self.environment.variables
+                old_value = self.environment.variables.get(parameter[0])
+
+                self.environment.variables[parameter[0]] = self.evaluate(
+                    node.arguments[0]
+                )
+
+                result = self.evaluate(function.body)
+
+                if had_old_value:
+                    self.environment.variables[parameter[0]] = old_value
+
+                else:
+                    del self.environment.variables[parameter[0]]
+                return result
 
         elif isinstance(node, IdentifierNode):
             if node.value in self.environment.variables:
@@ -440,6 +541,11 @@ class Evaluator:
             value = self.evaluate(node.right)
             self.environment.variables[node.name] = value
             return value
+
+        elif isinstance(node, FunctionDefintionNode):
+            function = UserFunction(node.name, node.parameters, node.body)
+            self.environment.functions[node.name] = function
+            return 0
         else:
             return 0
 
@@ -448,9 +554,32 @@ class App:
     def __init__(self) -> None:
         self.environment = Environment()
 
+    def help_menus_and_such(self, expression):
+
+        match expression:
+            case ":help":
+                print(
+                    "type any expression using +-/*^ operators and basic functions like sqrt() and sin()\n Use :funcs to show list of all functions\n Use :vars to show list of all saved variables"
+                )
+            case ":vars" | ":variables":
+                print("CONSTANTS\n-------------------------")
+                for constant, value in CONSTANTS.items():
+                    print(f"{constant}: {value}")
+
+                print("VARIABLES\n-------------------------")
+                for variable, value in self.environment.variables.items():
+                    print(f"{variable}: {value}")
+            case ":funcs" | ":functions":
+                print("\n FUNCTIONS\n-------------------------")
+                for function, value in FUNCTIONS.items():
+                    print(f"{function}(x)")
+
     def run(self):
         while True:
             expression = input(">")
+
+            if expression.capitalize() in ["QUIT", ":QUIT", "Q"]:
+                break
 
             if expression not in [
                 ":help",
@@ -460,38 +589,27 @@ class App:
                 ":funcs",
             ]:
                 lexer = Lexer(expression)
-                tokens = lexer.tokenize_all()
 
-                parser = Parser(tokens)
-                AST_tree_root = parser.parse()
+                try:
+                    tokens = lexer.tokenize_all()
+                    parser = Parser(tokens)
+                    AST_tree_root = parser.parse()
 
-                evaluator = Evaluator(self.environment)
-                answer = evaluator.evaluate(AST_tree_root)
+                    evaluator = Evaluator(self.environment)
+                    answer = evaluator.evaluate(AST_tree_root)
 
-                print(answer)
+                    if answer:
+                        print(format_result(answer))
+                    print()
+                except SyntaxError as error:
+                    print(error)
+                except OverflowError:
+                    print("VALUE OVERFLOW")
 
             else:
-                match expression:
-                    case ":help":
-                        print(
-                            "type any expression using +-/*^ operators and basic functions like sqrt() and sin()\n Use :funcs to show list of all functions\n Use :vars to show list of all saved variables"
-                        )
-                    case ":vars" | ":variables":
-                        print("CONSTANTS\n-------------------------")
-                        for constant, value in CONSTANTS.items():
-                            print(f"{constant}: {value}")
-
-                        print("VARIABLES\n-------------------------")
-                        for variable, value in self.environment.variables.items():
-                            print(f"{variable}: {value}")
-                    case ":funcs" | ":functions":
-                        print("\n FUNCTIONS\n-------------------------")
-                        for function, value in FUNCTIONS.items():
-                            print(f"{function}(x)")
+                self.help_menus_and_such(expression)
 
 
-environment = Environment()
-
-app = App()
-
-app.run()
+if __name__ == "__main__":
+    app = App()
+    app.run()
